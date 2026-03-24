@@ -175,6 +175,60 @@ def extract_tokens(final_page: str) -> list[str]:
     return sorted(set(tokens))
 
 
+def extract_resource_paths(page_text: str, base_url: str) -> list[str]:
+    matches = re.findall(r'(?:src|href)=["\']([^"\']+)["\']', page_text, flags=re.IGNORECASE)
+    urls = []
+    for value in matches:
+        if value.startswith(("javascript:", "mailto:", "data:")):
+            continue
+        urls.append(urljoin(base_url, value))
+    return sorted(set(urls))
+
+
+def extract_paps_ids_from_urls(urls: Iterable[str]) -> list[str]:
+    ids: list[str] = []
+    for value in urls:
+        ids.extend(re.findall(r"paps\.html\?id=([^'\"&\s]+)", value))
+    return sorted(set(ids))
+
+
+def extract_tokens_with_resource_tree(base_url: str, page_text: str, cfg: Config) -> list[str]:
+    """
+    正则在主文档未命中时的兜底：模拟浏览器“资源树”思路，
+    枚举页面引用的资源路径并抓取内容，再次提取 token/id。
+    """
+    tokens: set[str] = set(extract_tokens(page_text))
+
+    to_visit = extract_resource_paths(page_text, base_url)
+    visited: set[str] = set()
+    max_resources = 80
+
+    # 资源路径本身可能直接带有 paps.html?id=...
+    tokens.update(extract_paps_ids_from_urls(to_visit))
+
+    while to_visit and len(visited) < max_resources:
+        url = to_visit.pop(0)
+        if url in visited:
+            continue
+        visited.add(url)
+
+        try:
+            body = fetch_text(url, cfg.timeout_seconds)
+        except Exception as exc:
+            print(f"[warn] open resource failed: {url} err={exc}")
+            continue
+
+        tokens.update(extract_tokens(body))
+
+        nested_urls = extract_resource_paths(body, url)
+        tokens.update(extract_paps_ids_from_urls(nested_urls))
+        for nested in nested_urls:
+            if nested not in visited and nested not in to_visit and len(visited) + len(to_visit) < max_resources:
+                to_visit.append(nested)
+
+    return sorted(tokens)
+
+
 def write_tokens(path: Path, tokens: list[str]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text("\n".join(tokens) + ("\n" if tokens else ""), encoding="utf-8")
@@ -264,7 +318,11 @@ def run_once(cfg: Config) -> None:
     for dp_url, meta in data_play_tasks:
         try:
             final_page = fetch_text(dp_url, cfg.timeout_seconds)
-            for token in extract_tokens(final_page):
+            tokens = extract_tokens(final_page)
+            if not tokens:
+                tokens = extract_tokens_with_resource_tree(dp_url, final_page, cfg)
+
+            for token in tokens:
                 token_only.add(token)
                 row = {
                     "id": token,
