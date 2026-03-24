@@ -1,4 +1,5 @@
 import datetime as dt
+import json
 import os
 import re
 import threading
@@ -21,6 +22,7 @@ class Config:
     schedule_minutes: int
     tz_name: str
     output_file: Path
+    matches_file: Path
     timeout_seconds: int
     host: str
     port: int
@@ -35,6 +37,7 @@ def load_config() -> Config:
         schedule_minutes=int(os.getenv("SCHEDULE_MINUTES", "10")),
         tz_name=os.getenv("TZ_NAME", "Asia/Shanghai"),
         output_file=Path(os.getenv("OUTPUT_FILE", "output/tokens.txt")),
+        matches_file=Path(os.getenv("MATCHES_FILE", "output/matches.json")),
         timeout_seconds=int(os.getenv("HTTP_TIMEOUT_SECONDS", "20")),
         host=os.getenv("HOST", "0.0.0.0"),
         port=int(os.getenv("PORT", "5000")),
@@ -65,8 +68,12 @@ def fetch_text(url: str, timeout_seconds: int) -> str:
     return resp.text
 
 
+def extract_document_write_lines(js_text: str) -> list[str]:
+    return re.findall(r"document\.write\('([^']*)'\);", js_text)
+
+
 def extract_time_href_pairs(js_text: str) -> list[tuple[str, str]]:
-    lines = re.findall(r"document\.write\('([^']*)'\);", js_text)
+    lines = extract_document_write_lines(js_text)
     pairs: list[tuple[str, str]] = []
     current_time = ""
 
@@ -86,6 +93,53 @@ def extract_time_href_pairs(js_text: str) -> list[tuple[str, str]]:
                 pairs.append((current_time, href))
 
     return pairs
+
+
+def extract_matches(js_text: str, league_prefix: str = "JRS") -> list[dict[str, str]]:
+    lines = extract_document_write_lines(js_text)
+    matches: list[dict[str, str]] = []
+    current: dict[str, str] | None = None
+
+    league_re = re.compile(r'class="lab_events"[^>]*><span class="name">([^<]+)</span>')
+    time_re = re.compile(r'class="lab_time">([^<]+)<')
+    home_re = re.compile(r'class="lab_team_home"><strong class="name">([^<]+)</strong>')
+    away_re = re.compile(r'class="lab_team_away"><strong class="name">([^<]+)</strong>')
+
+    for line in lines:
+        if line.startswith('<ul class="item play'):
+            current = {"league": "", "time": "", "home": "", "away": ""}
+            continue
+
+        if current is None:
+            continue
+
+        m = league_re.search(line)
+        if m:
+            league = m.group(1).strip()
+            current["league"] = f"{league_prefix}{league}"
+            continue
+
+        m = time_re.search(line)
+        if m:
+            current["time"] = m.group(1).strip()
+            continue
+
+        m = home_re.search(line)
+        if m:
+            current["home"] = m.group(1).strip()
+            continue
+
+        m = away_re.search(line)
+        if m:
+            current["away"] = m.group(1).strip()
+            continue
+
+        if line == "</ul>":
+            if current["league"] and current["time"] and current["home"] and current["away"]:
+                matches.append(current)
+            current = None
+
+    return matches
 
 
 def parse_mmdd_hhmm_to_datetime(value: str, now_bj: dt.datetime) -> dt.datetime | None:
@@ -134,6 +188,15 @@ def filter_candidate_links(
     return sorted(set(out))
 
 
+def filter_matches_by_time(matches: Iterable[dict[str, str]], now_bj: dt.datetime) -> list[dict[str, str]]:
+    out: list[dict[str, str]] = []
+    for item in matches:
+        evt = parse_mmdd_hhmm_to_datetime(item["time"], now_bj)
+        if evt and within_3h(evt, now_bj):
+            out.append(item)
+    return out
+
+
 def extract_data_play_urls(page_text: str, cfg: Config) -> list[str]:
     pattern = re.compile(
         rf'<a[^>]*data-play="([^"]+)"[^>]*>\s*<em[^>]*></em>\s*<strong>([^<]*({cfg.keywords_regex})[^<]*)</strong>',
@@ -167,12 +230,30 @@ def read_tokens(path: Path) -> list[str]:
     return [ln.strip() for ln in path.read_text(encoding="utf-8").splitlines() if ln.strip()]
 
 
+def write_matches(path: Path, matches: list[dict[str, str]]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(matches, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def read_matches(path: Path) -> list[dict[str, str]]:
+    if not path.exists():
+        return []
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+        if isinstance(data, list):
+            return [x for x in data if isinstance(x, dict)]
+    except Exception:
+        return []
+    return []
+
+
 class AppState:
     def __init__(self) -> None:
         self.lock = threading.Lock()
         self.last_run_at: str | None = None
         self.last_error: str | None = None
         self.last_count: int = 0
+        self.last_match_count: int = 0
 
 
 STATE = AppState()
@@ -186,6 +267,12 @@ def run_once(cfg: Config) -> None:
 
     now_bj = now_in_tz(cfg.tz_name)
     js_text = fetch_text(cfg.source_url, cfg.timeout_seconds)
+
+    # 抓取比赛信息（联赛 + 时间 + 对阵）并按北京时间前后3小时过滤
+    matches = extract_matches(js_text, league_prefix="JRS")
+    filtered_matches = filter_matches_by_time(matches, now_bj)
+    write_matches(cfg.matches_file, filtered_matches)
+
     pairs = extract_time_href_pairs(js_text)
     candidate_links = filter_candidate_links(pairs, cfg, now_bj)
 
@@ -214,8 +301,12 @@ def run_once(cfg: Config) -> None:
         STATE.last_run_at = now_bj.isoformat()
         STATE.last_error = None
         STATE.last_count = len(tokens)
+        STATE.last_match_count = len(filtered_matches)
 
-    print(f"[info] tokens written: {len(tokens)} -> {cfg.output_file}")
+    print(
+        f"[info] tokens={len(tokens)} matches={len(filtered_matches)} "
+        f"-> {cfg.output_file} / {cfg.matches_file}"
+    )
 
 
 def scheduler_loop(cfg: Config) -> None:
@@ -243,8 +334,17 @@ def create_app(cfg: Config) -> Flask:
                 "last_run_at": STATE.last_run_at,
                 "last_error": STATE.last_error,
                 "last_count": STATE.last_count,
+                "last_match_count": STATE.last_match_count,
                 "output_file": str(cfg.output_file),
-                "endpoints": ["/", "/healthz", "/ids", "/ids.txt", "/run-once"],
+                "matches_file": str(cfg.matches_file),
+                "endpoints": [
+                    "/",
+                    "/healthz",
+                    "/ids",
+                    "/ids.txt",
+                    "/matches",
+                    "/run-once",
+                ],
             }
         return jsonify(payload)
 
@@ -261,6 +361,11 @@ def create_app(cfg: Config) -> Flask:
     def ids_text() -> Response:
         ids = read_tokens(cfg.output_file)
         return Response("\n".join(ids) + ("\n" if ids else ""), mimetype="text/plain; charset=utf-8")
+
+    @app.get("/matches")
+    def matches_json() -> Response:
+        matches = read_matches(cfg.matches_file)
+        return jsonify({"count": len(matches), "matches": matches})
 
     @app.post("/run-once")
     def trigger_once() -> Response:

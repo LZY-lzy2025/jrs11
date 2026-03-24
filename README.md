@@ -12,7 +12,8 @@
    - `var encodedStr = '...'`
    - 若未找到，则提取 `paps.html?id=...` 的 `id` 参数。
 6. 将汇总结果写入 `output/tokens.txt`。
-7. 提供 HTTP 接口查看状态和导出 ID。
+7. 同时抓取比赛信息（联赛 + 时间 + 对阵双方），联赛名前自动加 `JRS` 前缀，并写入 `output/matches.json`。
+8. 提供 HTTP 接口查看状态和导出数据。
 
 ## 本地运行
 
@@ -32,6 +33,7 @@ docker run --rm --env-file .env -p 5000:5000 -v $(pwd)/output:/app/output schedu
 - `KEYWORDS_REGEX`: 匹配频道文案（默认 `高清直播|蓝光`）
 - `SCHEDULE_MINUTES`: 轮询间隔（分钟）
 - `TZ_NAME`: 时区（默认 `Asia/Shanghai`）
+- `MATCHES_FILE`: 比赛信息输出文件（默认 `output/matches.json`）
 - `HOST`: HTTP 服务监听地址（默认 `0.0.0.0`）
 - `PORT`: HTTP 服务端口（默认 `5000`）
 
@@ -41,11 +43,13 @@ docker run --rm --env-file .env -p 5000:5000 -v $(pwd)/output:/app/output schedu
 - `GET /healthz`：健康检查
 - `GET /ids`：JSON 格式 ID 列表
 - `GET /ids.txt`：纯文本 ID 列表
+- `GET /matches`：JSON 格式比赛信息（含 `JRS` 联赛前缀）
 - `POST /run-once`：手动触发一次抓取
 
 ## 输出
 
 - `output/tokens.txt`：每轮覆盖写入，包含去重后的 token（`encodedStr` 或 `paps.html?id=` 参数）。
+- `output/matches.json`：每轮覆盖写入，包含比赛信息（联赛、时间、主队、客队）。
 
 ## GitHub Actions
 
