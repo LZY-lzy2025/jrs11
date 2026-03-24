@@ -22,7 +22,7 @@ class Config:
     schedule_minutes: int
     tz_name: str
     output_file: Path
-    matches_file: Path
+    ids_file: Path
     timeout_seconds: int
     host: str
     port: int
@@ -37,7 +37,7 @@ def load_config() -> Config:
         schedule_minutes=int(os.getenv("SCHEDULE_MINUTES", "10")),
         tz_name=os.getenv("TZ_NAME", "Asia/Shanghai"),
         output_file=Path(os.getenv("OUTPUT_FILE", "output/tokens.txt")),
-        matches_file=Path(os.getenv("MATCHES_FILE", "output/matches.json")),
+        ids_file=Path(os.getenv("IDS_FILE", "output/ids.json")),
         timeout_seconds=int(os.getenv("HTTP_TIMEOUT_SECONDS", "20")),
         host=os.getenv("HOST", "0.0.0.0"),
         port=int(os.getenv("PORT", "5000")),
@@ -70,76 +70,6 @@ def fetch_text(url: str, timeout_seconds: int) -> str:
 
 def extract_document_write_lines(js_text: str) -> list[str]:
     return re.findall(r"document\.write\('([^']*)'\);", js_text)
-
-
-def extract_time_href_pairs(js_text: str) -> list[tuple[str, str]]:
-    lines = extract_document_write_lines(js_text)
-    pairs: list[tuple[str, str]] = []
-    current_time = ""
-
-    time_re = re.compile(r'class="lab_time">([^<]+)<')
-    href_re = re.compile(r'href="([^"]+)"')
-
-    for line in lines:
-        time_match = time_re.search(line)
-        if time_match:
-            current_time = time_match.group(1).strip()
-            continue
-
-        href_match = href_re.search(line)
-        if href_match and current_time:
-            href = href_match.group(1).strip()
-            if href.startswith("http://") or href.startswith("https://"):
-                pairs.append((current_time, href))
-
-    return pairs
-
-
-def extract_matches(js_text: str, league_prefix: str = "JRS") -> list[dict[str, str]]:
-    lines = extract_document_write_lines(js_text)
-    matches: list[dict[str, str]] = []
-    current: dict[str, str] | None = None
-
-    league_re = re.compile(r'class="lab_events"[^>]*><span class="name">([^<]+)</span>')
-    time_re = re.compile(r'class="lab_time">([^<]+)<')
-    home_re = re.compile(r'class="lab_team_home"><strong class="name">([^<]+)</strong>')
-    away_re = re.compile(r'class="lab_team_away"><strong class="name">([^<]+)</strong>')
-
-    for line in lines:
-        if line.startswith('<ul class="item play'):
-            current = {"league": "", "time": "", "home": "", "away": ""}
-            continue
-
-        if current is None:
-            continue
-
-        m = league_re.search(line)
-        if m:
-            league = m.group(1).strip()
-            current["league"] = f"{league_prefix}{league}"
-            continue
-
-        m = time_re.search(line)
-        if m:
-            current["time"] = m.group(1).strip()
-            continue
-
-        m = home_re.search(line)
-        if m:
-            current["home"] = m.group(1).strip()
-            continue
-
-        m = away_re.search(line)
-        if m:
-            current["away"] = m.group(1).strip()
-            continue
-
-        if line == "</ul>":
-            if current["league"] and current["time"] and current["home"] and current["away"]:
-                matches.append(current)
-            current = None
-
-    return matches
 
 
 def parse_mmdd_hhmm_to_datetime(value: str, now_bj: dt.datetime) -> dt.datetime | None:
@@ -175,26 +105,52 @@ def within_3h(event_time: dt.datetime, now_bj: dt.datetime) -> bool:
     return abs((event_time - now_bj).total_seconds()) <= 3 * 3600
 
 
-def filter_candidate_links(
-    pairs: Iterable[tuple[str, str]], cfg: Config, now_bj: dt.datetime
-) -> list[str]:
-    out: list[str] = []
-    for time_str, href in pairs:
-        if cfg.play_link_host_filter and cfg.play_link_host_filter not in href:
+def extract_match_items(js_text: str, league_prefix: str = "JRS") -> list[dict]:
+    lines = extract_document_write_lines(js_text)
+    items: list[dict] = []
+    current: dict | None = None
+
+    league_re = re.compile(r'class="lab_events"[^>]*><span class="name">([^<]+)</span>')
+    time_re = re.compile(r'class="lab_time">([^<]+)<')
+    home_re = re.compile(r'class="lab_team_home"><strong class="name">([^<]+)</strong>')
+    away_re = re.compile(r'class="lab_team_away"><strong class="name">([^<]+)</strong>')
+    href_re = re.compile(r'href="([^"]+)"')
+
+    for line in lines:
+        if line.startswith('<ul class="item play'):
+            current = {"league": "", "time": "", "home": "", "away": "", "hrefs": []}
             continue
-        evt = parse_mmdd_hhmm_to_datetime(time_str, now_bj)
-        if evt and within_3h(evt, now_bj):
-            out.append(href)
-    return sorted(set(out))
 
+        if current is None:
+            continue
 
-def filter_matches_by_time(matches: Iterable[dict[str, str]], now_bj: dt.datetime) -> list[dict[str, str]]:
-    out: list[dict[str, str]] = []
-    for item in matches:
-        evt = parse_mmdd_hhmm_to_datetime(item["time"], now_bj)
-        if evt and within_3h(evt, now_bj):
-            out.append(item)
-    return out
+        m = league_re.search(line)
+        if m:
+            current["league"] = f"{league_prefix}{m.group(1).strip()}"
+
+        m = time_re.search(line)
+        if m:
+            current["time"] = m.group(1).strip()
+
+        m = home_re.search(line)
+        if m:
+            current["home"] = m.group(1).strip()
+
+        m = away_re.search(line)
+        if m:
+            current["away"] = m.group(1).strip()
+
+        for hm in href_re.findall(line):
+            if hm.startswith("http://") or hm.startswith("https://"):
+                current["hrefs"].append(hm.strip())
+
+        if line == "</ul>":
+            if current["league"] and current["time"] and current["home"] and current["away"]:
+                current["hrefs"] = sorted(set(current["hrefs"]))
+                items.append(current)
+            current = None
+
+    return items
 
 
 def extract_data_play_urls(page_text: str, cfg: Config) -> list[str]:
@@ -230,12 +186,12 @@ def read_tokens(path: Path) -> list[str]:
     return [ln.strip() for ln in path.read_text(encoding="utf-8").splitlines() if ln.strip()]
 
 
-def write_matches(path: Path, matches: list[dict[str, str]]) -> None:
+def write_ids(path: Path, ids: list[dict]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(matches, ensure_ascii=False, indent=2), encoding="utf-8")
+    path.write_text(json.dumps(ids, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
-def read_matches(path: Path) -> list[dict[str, str]]:
+def read_ids(path: Path) -> list[dict]:
     if not path.exists():
         return []
     try:
@@ -253,7 +209,6 @@ class AppState:
         self.last_run_at: str | None = None
         self.last_error: str | None = None
         self.last_count: int = 0
-        self.last_match_count: int = 0
 
 
 STATE = AppState()
@@ -268,45 +223,73 @@ def run_once(cfg: Config) -> None:
     now_bj = now_in_tz(cfg.tz_name)
     js_text = fetch_text(cfg.source_url, cfg.timeout_seconds)
 
-    # 抓取比赛信息（联赛 + 时间 + 对阵）并按北京时间前后3小时过滤
-    matches = extract_matches(js_text, league_prefix="JRS")
-    filtered_matches = filter_matches_by_time(matches, now_bj)
-    write_matches(cfg.matches_file, filtered_matches)
+    raw_items = extract_match_items(js_text, league_prefix="JRS")
 
-    pairs = extract_time_href_pairs(js_text)
-    candidate_links = filter_candidate_links(pairs, cfg, now_bj)
+    # 过滤到北京时间前后3小时的比赛，并建立 match_link -> match_meta 映射
+    match_links: list[tuple[str, dict]] = []
+    for item in raw_items:
+        evt = parse_mmdd_hhmm_to_datetime(item["time"], now_bj)
+        if not evt or not within_3h(evt, now_bj):
+            continue
+        meta = {
+            "league": item["league"],
+            "time": item["time"],
+            "home": item["home"],
+            "away": item["away"],
+        }
+        for href in item["hrefs"]:
+            if cfg.play_link_host_filter and cfg.play_link_host_filter not in href:
+                continue
+            match_links.append((href, meta))
 
-    secondary_links: list[str] = []
-    for link in candidate_links:
+    # 候选页面 -> data-play
+    data_play_tasks: list[tuple[str, dict]] = []
+    seen_pair = set()
+    for href, meta in match_links:
         try:
-            page = fetch_text(link, cfg.timeout_seconds)
-            secondary_links.extend(extract_data_play_urls(page, cfg))
+            page = fetch_text(href, cfg.timeout_seconds)
+            for dp in extract_data_play_urls(page, cfg):
+                key = (dp, meta["league"], meta["time"], meta["home"], meta["away"])
+                if key not in seen_pair:
+                    seen_pair.add(key)
+                    data_play_tasks.append((dp, meta))
         except Exception as exc:
-            print(f"[warn] open candidate failed: {link} err={exc}")
+            print(f"[warn] open candidate failed: {href} err={exc}")
 
-    secondary_links = sorted(set(secondary_links))
+    # data-play -> ids，并与比赛信息一一对应
+    mapped_ids: list[dict] = []
+    seen_mapped = set()
+    token_only: set[str] = set()
 
-    token_set: set[str] = set()
-    for url in secondary_links:
+    for dp_url, meta in data_play_tasks:
         try:
-            final_page = fetch_text(url, cfg.timeout_seconds)
-            token_set.update(extract_tokens(final_page))
+            final_page = fetch_text(dp_url, cfg.timeout_seconds)
+            for token in extract_tokens(final_page):
+                token_only.add(token)
+                row = {
+                    "id": token,
+                    "league": meta["league"],
+                    "time": meta["time"],
+                    "home": meta["home"],
+                    "away": meta["away"],
+                }
+                sk = (row["id"], row["league"], row["time"], row["home"], row["away"])
+                if sk not in seen_mapped:
+                    seen_mapped.add(sk)
+                    mapped_ids.append(row)
         except Exception as exc:
-            print(f"[warn] open data-play failed: {url} err={exc}")
+            print(f"[warn] open data-play failed: {dp_url} err={exc}")
 
-    tokens = sorted(token_set)
-    write_tokens(cfg.output_file, tokens)
+    mapped_ids.sort(key=lambda x: (x["time"], x["league"], x["home"], x["away"], x["id"]))
+    write_ids(cfg.ids_file, mapped_ids)
+    write_tokens(cfg.output_file, sorted(token_only))
 
     with STATE.lock:
         STATE.last_run_at = now_bj.isoformat()
         STATE.last_error = None
-        STATE.last_count = len(tokens)
-        STATE.last_match_count = len(filtered_matches)
+        STATE.last_count = len(mapped_ids)
 
-    print(
-        f"[info] tokens={len(tokens)} matches={len(filtered_matches)} "
-        f"-> {cfg.output_file} / {cfg.matches_file}"
-    )
+    print(f"[info] mapped ids={len(mapped_ids)} -> {cfg.ids_file}")
 
 
 def scheduler_loop(cfg: Config) -> None:
@@ -333,18 +316,10 @@ def create_app(cfg: Config) -> Flask:
                 "status": "running",
                 "last_run_at": STATE.last_run_at,
                 "last_error": STATE.last_error,
-                "last_count": STATE.last_count,
-                "last_match_count": STATE.last_match_count,
-                "output_file": str(cfg.output_file),
-                "matches_file": str(cfg.matches_file),
-                "endpoints": [
-                    "/",
-                    "/healthz",
-                    "/ids",
-                    "/ids.txt",
-                    "/matches",
-                    "/run-once",
-                ],
+                "mapped_id_count": STATE.last_count,
+                "ids_file": str(cfg.ids_file),
+                "tokens_file": str(cfg.output_file),
+                "endpoints": ["/", "/healthz", "/ids", "/ids.txt", "/run-once"],
             }
         return jsonify(payload)
 
@@ -354,18 +329,14 @@ def create_app(cfg: Config) -> Flask:
 
     @app.get("/ids")
     def ids_json() -> Response:
-        ids = read_tokens(cfg.output_file)
-        return jsonify({"count": len(ids), "ids": ids})
+        data = read_ids(cfg.ids_file)
+        return jsonify({"count": len(data), "items": data})
 
     @app.get("/ids.txt")
     def ids_text() -> Response:
-        ids = read_tokens(cfg.output_file)
-        return Response("\n".join(ids) + ("\n" if ids else ""), mimetype="text/plain; charset=utf-8")
-
-    @app.get("/matches")
-    def matches_json() -> Response:
-        matches = read_matches(cfg.matches_file)
-        return jsonify({"count": len(matches), "matches": matches})
+        data = read_ids(cfg.ids_file)
+        lines = [f'{i["league"]}|{i["time"]}|{i["home"]} vs {i["away"]}|{i["id"]}' for i in data]
+        return Response("\n".join(lines) + ("\n" if lines else ""), mimetype="text/plain; charset=utf-8")
 
     @app.post("/run-once")
     def trigger_once() -> Response:
