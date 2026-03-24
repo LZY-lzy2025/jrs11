@@ -13,4 +13,6 @@ COPY README.md ./README.md
 
 RUN mkdir -p /app/output
 
+EXPOSE 5000
+
 CMD ["python", "-m", "app.main"]
