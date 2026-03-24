@@ -23,11 +23,11 @@ docker build -t scheduled-link-collector .
 docker run --rm --env-file .env -v $(pwd)/output:/app/output scheduled-link-collector
 ```
 
-## 关键环境变量
+## 关键环境变量（均有默认值）
 
-- `SOURCE_URL`: 要抓取的 JS 地址
-- `PLAY_LINK_HOST_FILTER`: 仅处理包含该主机的候选 href（如 `play.sportsteam368.com`）
-- `PLAY_HOST_PREFIX`: 将 `data-play` 相对路径拼接的域名前缀（如 `http://play.sportsteam368.com`）
+- `SOURCE_URL`: 要抓取的 JS 地址（默认已预填你提供的地址）
+- `PLAY_LINK_HOST_FILTER`: 仅处理包含该主机的候选 href（默认 `play.sportsteam368.com`）
+- `PLAY_HOST_PREFIX`: 将 `data-play` 相对路径拼接的域名前缀（默认 `http://play.sportsteam368.com`）
 - `KEYWORDS_REGEX`: 匹配频道文案（默认 `高清直播|蓝光`）
 - `SCHEDULE_MINUTES`: 轮询间隔（分钟）
 - `TZ_NAME`: 时区（默认 `Asia/Shanghai`）
