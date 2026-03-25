@@ -36,7 +36,7 @@ def load_config() -> Config:
         play_link_host_filter=os.getenv("PLAY_LINK_HOST_FILTER", "play.sportsteam368.com").strip(),
         play_host_prefix=os.getenv("PLAY_HOST_PREFIX", "http://play.sportsteam368.com").strip(),
         keywords_regex=os.getenv("KEYWORDS_REGEX", r"高清直播|蓝光"),
-        schedule_minutes=int(os.getenv("SCHEDULE_MINUTES", "10")),
+        schedule_minutes=int(os.getenv("SCHEDULE_MINUTES", "25")),
         tz_name=os.getenv("TZ_NAME", "Asia/Shanghai"),
         output_file=Path(os.getenv("OUTPUT_FILE", "output/tokens.txt")),
         ids_file=Path(os.getenv("IDS_FILE", "output/ids.json")),
