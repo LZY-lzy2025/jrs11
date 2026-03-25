@@ -175,10 +175,20 @@ def extract_tokens(final_page: str) -> list[str]:
     return sorted(set(tokens))
 
 
+def contains_paps_id(text: str) -> bool:
+    return bool(re.search(r"paps\.html\?id=([^'\"&\s]+)", text))
+
+
 def extract_resource_paths(page_text: str, base_url: str) -> list[str]:
     matches = re.findall(r'(?:src|href)=["\']([^"\']+)["\']', page_text, flags=re.IGNORECASE)
+    # JS 中常见的字符串 URL（含转义 \/）也视作“资源树”候选。
+    matches.extend(re.findall(r'["\']((?:https?:)?//[^"\']+)["\']', page_text, flags=re.IGNORECASE))
+    matches.extend(re.findall(r'["\'](/[^"\']+\.(?:js|mjs|css|json|html?)(?:\?[^"\']*)?)["\']', page_text, flags=re.IGNORECASE))
     urls = []
     for value in matches:
+        value = value.replace("\\/", "/")
+        if value.startswith("//"):
+            value = "https:" + value
         if value.startswith(("javascript:", "mailto:", "data:")):
             continue
         urls.append(urljoin(base_url, value))
@@ -319,8 +329,8 @@ def run_once(cfg: Config) -> None:
         try:
             final_page = fetch_text(dp_url, cfg.timeout_seconds)
             tokens = extract_tokens(final_page)
-            if not tokens:
-                tokens = extract_tokens_with_resource_tree(dp_url, final_page, cfg)
+            if not contains_paps_id(final_page):
+                tokens = sorted(set(tokens + extract_tokens_with_resource_tree(dp_url, final_page, cfg)))
 
             for token in tokens:
                 token_only.add(token)
