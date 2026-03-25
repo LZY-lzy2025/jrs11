@@ -22,7 +22,7 @@ docker build -t scheduled-link-collector .
 docker run --rm --env-file .env -p 5000:5000 -v $(pwd)/output:/app/output scheduled-link-collector
 ```
 
-> 该兜底逻辑依赖 Node.js + `puppeteer`（示例：`npm i puppeteer`）。
+> 该兜底逻辑依赖 Node.js + `puppeteer`（已在 `package.json` 声明；Docker 镜像构建时会自动安装）。
 
 ## 关键环境变量（均有默认值）
 

@@ -1,0 +1,9 @@
+{
+  "name": "scheduled-link-collector",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Helper runtime dependencies for browser-based fallback capture",
+  "dependencies": {
+    "puppeteer": "^24.7.1"
+  }
+}
