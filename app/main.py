@@ -2,12 +2,14 @@ import datetime as dt
 import json
 import os
 import re
+import asyncio
+import subprocess
 import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable
-from urllib.parse import urljoin
+from urllib.parse import parse_qs, urljoin, urlparse
 
 import requests
 from flask import Flask, Response, jsonify
@@ -179,62 +181,75 @@ def contains_paps_id(text: str) -> bool:
     return bool(re.search(r"paps\.html\?id=([^'\"&\s]+)", text))
 
 
-def extract_resource_paths(page_text: str, base_url: str) -> list[str]:
-    matches = re.findall(r'(?:src|href)=["\']([^"\']+)["\']', page_text, flags=re.IGNORECASE)
-    # JS 中常见的字符串 URL（含转义 \/）也视作“资源树”候选。
-    matches.extend(re.findall(r'["\']((?:https?:)?//[^"\']+)["\']', page_text, flags=re.IGNORECASE))
-    matches.extend(re.findall(r'["\'](/[^"\']+\.(?:js|mjs|css|json|html?)(?:\?[^"\']*)?)["\']', page_text, flags=re.IGNORECASE))
-    urls = []
-    for value in matches:
-        value = value.replace("\\/", "/")
-        if value.startswith("//"):
-            value = "https:" + value
-        if value.startswith(("javascript:", "mailto:", "data:")):
-            continue
-        urls.append(urljoin(base_url, value))
-    return sorted(set(urls))
-
-
 def extract_paps_ids_from_urls(urls: Iterable[str]) -> list[str]:
-    ids: list[str] = []
+    ids: set[str] = set()
     for value in urls:
-        ids.extend(re.findall(r"paps\.html\?id=([^'\"&\s]+)", value))
-    return sorted(set(ids))
+        try:
+            parsed = urlparse(value)
+        except Exception:
+            continue
+        if "paps.html" not in parsed.path:
+            continue
+        query = parse_qs(parsed.query)
+        for item in query.get("id", []):
+            token = item.strip()
+            if token:
+                ids.add(token)
+    return sorted(ids)
+
+
+async def capture_resource_urls_with_browser(url: str, timeout_seconds: int) -> list[str]:
+    """
+    使用 Puppeteer 网络响应拦截抓取资源 URL，避免依赖正则从 HTML/JS 文本里猜路径。
+    """
+    script_path = Path(__file__).with_name("capture_paths.js")
+    if not script_path.exists():
+        print(f"[warn] puppeteer script missing: {script_path}")
+        return []
+
+    env = os.environ.copy()
+    env["TARGET_URL"] = url
+    env["NAV_TIMEOUT_MS"] = str(max(timeout_seconds, 1) * 1000)
+
+    try:
+        proc = await asyncio.to_thread(
+            subprocess.run,
+            ["node", str(script_path)],
+            capture_output=True,
+            text=True,
+            timeout=max(timeout_seconds * 2, 15),
+            env=env,
+            check=False,
+        )
+    except Exception as exc:
+        print(f"[warn] puppeteer runner unavailable: {exc}")
+        return []
+
+    if proc.returncode != 0:
+        err = (proc.stderr or proc.stdout).strip()
+        print(f"[warn] puppeteer capture failed: {err}")
+        return []
+
+    try:
+        data = json.loads(proc.stdout.strip() or "[]")
+        if isinstance(data, list):
+            return sorted({str(x).strip() for x in data if str(x).strip()})
+    except Exception as exc:
+        print(f"[warn] puppeteer output parse failed: {exc}")
+    return []
 
 
 def extract_tokens_with_resource_tree(base_url: str, page_text: str, cfg: Config) -> list[str]:
     """
-    正则在主文档未命中时的兜底：模拟浏览器“资源树”思路，
-    枚举页面引用的资源路径并抓取内容，再次提取 token/id。
+    主文档未命中时的兜底：通过真实浏览器抓取网络响应 URL，
+    直接从路径参数中提取 paps.html?id=...。
     """
     tokens: set[str] = set(extract_tokens(page_text))
-
-    to_visit = extract_resource_paths(page_text, base_url)
-    visited: set[str] = set()
-    max_resources = 80
-
-    # 资源路径本身可能直接带有 paps.html?id=...
-    tokens.update(extract_paps_ids_from_urls(to_visit))
-
-    while to_visit and len(visited) < max_resources:
-        url = to_visit.pop(0)
-        if url in visited:
-            continue
-        visited.add(url)
-
-        try:
-            body = fetch_text(url, cfg.timeout_seconds)
-        except Exception as exc:
-            print(f"[warn] open resource failed: {url} err={exc}")
-            continue
-
-        tokens.update(extract_tokens(body))
-
-        nested_urls = extract_resource_paths(body, url)
-        tokens.update(extract_paps_ids_from_urls(nested_urls))
-        for nested in nested_urls:
-            if nested not in visited and nested not in to_visit and len(visited) + len(to_visit) < max_resources:
-                to_visit.append(nested)
+    try:
+        urls = asyncio.run(capture_resource_urls_with_browser(base_url, cfg.timeout_seconds))
+        tokens.update(extract_paps_ids_from_urls(urls))
+    except Exception as exc:
+        print(f"[warn] browser resource capture failed: {base_url} err={exc}")
 
     return sorted(tokens)
 
