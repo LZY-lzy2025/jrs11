@@ -10,6 +10,7 @@
 4. 只保留“当前北京时间前后 3 小时”的比赛。
 5. 提取并访问候选播放链接，抓取最终 `id`。
 6. 将抓到的 `id` 与比赛信息**一一对应**输出到 `/ids` 和 `/ids.txt`。
+7. 当页面正文未直接出现 `id` 时，使用 Puppeteer 拦截真实网络响应 URL，再从 `paps.html?id=...` 中提取。
 
 ## 本地运行
 
@@ -20,6 +21,8 @@ cp .env.example .env
 docker build -t scheduled-link-collector .
 docker run --rm --env-file .env -p 5000:5000 -v $(pwd)/output:/app/output scheduled-link-collector
 ```
+
+> 该兜底逻辑依赖 Node.js + `puppeteer`（已在 `package.json` 声明；Docker 镜像构建时会自动安装）。
 
 ## 关键环境变量（均有默认值）
 
