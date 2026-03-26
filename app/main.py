@@ -170,12 +170,6 @@ def extract_data_play_urls(page_text: str, cfg: Config) -> list[str]:
     return sorted(set(urls))
 
 
-def extract_tokens(final_page: str) -> list[str]:
-    tokens: list[str] = []
-    tokens.extend(re.findall(r"var\s+encodedStr\s*=\s*'([^']+)'", final_page))
-    return sorted(set(tokens))
-
-
 def extract_paps_ids_from_urls(urls: Iterable[str]) -> list[str]:
     ids: set[str] = set()
     for value in urls:
@@ -234,12 +228,13 @@ async def capture_resource_urls_with_browser(url: str, timeout_seconds: int) -> 
     return []
 
 
-def extract_tokens_with_resource_tree(base_url: str, page_text: str, cfg: Config) -> list[str]:
+def extract_tokens_with_resource_tree(base_url: str, cfg: Config) -> list[str]:
     """
     通过真实浏览器抓取网络响应 URL，
-    直接从文件路径参数中提取 paps.html?id=... 后面的 id。
+    仅从资源路径参数中提取 paps.html?id=... 后面的 id，
+    不再依赖页面正文正则匹配。
     """
-    tokens: set[str] = set(extract_tokens(page_text))
+    tokens: set[str] = set()
     try:
         urls = asyncio.run(capture_resource_urls_with_browser(base_url, cfg.timeout_seconds))
         tokens.update(extract_paps_ids_from_urls(urls))
@@ -337,8 +332,7 @@ def run_once(cfg: Config) -> None:
 
     for dp_url, meta in data_play_tasks:
         try:
-            final_page = fetch_text(dp_url, cfg.timeout_seconds)
-            tokens = extract_tokens_with_resource_tree(dp_url, final_page, cfg)
+            tokens = extract_tokens_with_resource_tree(dp_url, cfg)
 
             for token in tokens:
                 token_only.add(token)
