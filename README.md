@@ -43,6 +43,7 @@ docker run --rm --env-file .env -p 5000:5000 -v $(pwd)/output:/app/output schedu
 - `GET /healthz`：健康检查
 - `GET /ids`：JSON 映射（每条包含 `id/league/time/home/away`）
 - `GET /ids.txt`：文本映射（`联赛|时间|主队 vs 客队|id`）
+- `GET /debug`：返回 Node/Puppeteer 可用性、最近错误、资源树抓取样例（支持 `?url=` 指定调试页面）
 - `POST /run-once`：手动触发一次抓取
 
 ## 输出

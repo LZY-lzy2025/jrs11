@@ -12,7 +12,7 @@ from typing import Iterable
 from urllib.parse import parse_qs, urljoin, urlparse
 
 import requests
-from flask import Flask, Response, jsonify
+from flask import Flask, Response, jsonify, request
 
 
 @dataclass
@@ -193,7 +193,10 @@ async def capture_resource_urls_with_browser(url: str, timeout_seconds: int) -> 
     """
     script_path = Path(__file__).with_name("capture_paths.js")
     if not script_path.exists():
-        print(f"[warn] puppeteer script missing: {script_path}")
+        msg = f"puppeteer script missing: {script_path}"
+        with STATE.lock:
+            STATE.last_puppeteer_error = msg
+        print(f"[warn] {msg}")
         return []
 
     env = os.environ.copy()
@@ -211,19 +214,28 @@ async def capture_resource_urls_with_browser(url: str, timeout_seconds: int) -> 
             check=False,
         )
     except Exception as exc:
-        print(f"[warn] puppeteer runner unavailable: {exc}")
+        msg = f"puppeteer runner unavailable: {exc}"
+        with STATE.lock:
+            STATE.last_puppeteer_error = msg
+        print(f"[warn] {msg}")
         return []
 
     if proc.returncode != 0:
         err = (proc.stderr or proc.stdout).strip()
+        with STATE.lock:
+            STATE.last_puppeteer_error = err
         print(f"[warn] puppeteer capture failed: {err}")
         return []
 
     try:
         data = json.loads(proc.stdout.strip() or "[]")
         if isinstance(data, list):
+            with STATE.lock:
+                STATE.last_puppeteer_error = None
             return sorted({str(x).strip() for x in data if str(x).strip()})
     except Exception as exc:
+        with STATE.lock:
+            STATE.last_puppeteer_error = f"puppeteer output parse failed: {exc}"
         print(f"[warn] puppeteer output parse failed: {exc}")
     return []
 
@@ -278,6 +290,7 @@ class AppState:
         self.last_run_at: str | None = None
         self.last_error: str | None = None
         self.last_count: int = 0
+        self.last_puppeteer_error: str | None = None
 
 
 STATE = AppState()
@@ -387,9 +400,10 @@ def create_app(cfg: Config) -> Flask:
                 "last_run_at": STATE.last_run_at,
                 "last_error": STATE.last_error,
                 "mapped_id_count": STATE.last_count,
+                "last_puppeteer_error": STATE.last_puppeteer_error,
                 "ids_file": str(cfg.ids_file),
                 "tokens_file": str(cfg.output_file),
-                "endpoints": ["/", "/healthz", "/ids", "/ids.txt", "/run-once"],
+                "endpoints": ["/", "/healthz", "/ids", "/ids.txt", "/debug", "/run-once"],
             }
         return jsonify(payload)
 
@@ -407,6 +421,54 @@ def create_app(cfg: Config) -> Flask:
         data = read_ids(cfg.ids_file)
         lines = [f'{i["league"]}|{i["time"]}|{i["home"]} vs {i["away"]}|{i["id"]}' for i in data]
         return Response("\n".join(lines) + ("\n" if lines else ""), mimetype="text/plain; charset=utf-8")
+
+    @app.get("/debug")
+    def debug_info() -> Response:
+        target_url = request.args.get("url", "").strip()
+        if not target_url:
+            target_url = cfg.play_host_prefix
+
+        def run_cmd(cmd: list[str], timeout: int = 5) -> dict:
+            try:
+                proc = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout, check=False)
+                return {
+                    "ok": proc.returncode == 0,
+                    "code": proc.returncode,
+                    "stdout": (proc.stdout or "").strip(),
+                    "stderr": (proc.stderr or "").strip(),
+                }
+            except Exception as exc:
+                return {"ok": False, "error": str(exc)}
+
+        node_check = run_cmd(["node", "-v"])
+        npm_check = run_cmd(["npm", "list", "puppeteer", "--depth=0"], timeout=10)
+
+        capture_urls = asyncio.run(capture_resource_urls_with_browser(target_url, min(cfg.timeout_seconds, 15)))
+        capture_ids = extract_paps_ids_from_urls(capture_urls)
+        sample_size = min(max(int(request.args.get("sample", "10")), 1), 50)
+
+        with STATE.lock:
+            runtime = {
+                "last_run_at": STATE.last_run_at,
+                "last_error": STATE.last_error,
+                "last_puppeteer_error": STATE.last_puppeteer_error,
+                "mapped_id_count": STATE.last_count,
+            }
+
+        payload = {
+            "runtime": runtime,
+            "target_url": target_url,
+            "script_path": str(Path(__file__).with_name("capture_paths.js")),
+            "node_check": node_check,
+            "npm_puppeteer_check": npm_check,
+            "capture": {
+                "resource_url_count": len(capture_urls),
+                "id_count": len(capture_ids),
+                "sample_resource_urls": capture_urls[:sample_size],
+                "sample_ids": capture_ids[:sample_size],
+            },
+        }
+        return jsonify(payload)
 
     @app.post("/run-once")
     def trigger_once() -> Response:
