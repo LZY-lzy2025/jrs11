@@ -23,6 +23,7 @@ docker run --rm --env-file .env -p 5000:5000 -v $(pwd)/output:/app/output schedu
 ```
 
 > 该资源树抓取逻辑依赖 Node.js + `puppeteer`（已在 `package.json` 声明；Docker 镜像构建时会自动安装）。
+> Dockerfile 已包含 Chromium 运行依赖（如 `libglib2.0-0`），用于避免浏览器启动时报 `Code: 127` 共享库缺失。
 
 ## 关键环境变量（均有默认值）
 
