@@ -10,7 +10,7 @@
 4. 只保留“当前北京时间前后 3 小时”的比赛。
 5. 提取并访问候选播放链接，抓取最终 `id`。
 6. 将抓到的 `id` 与比赛信息**一一对应**输出到 `/ids` 和 `/ids.txt`。
-7. 当页面正文未直接出现 `id` 时，使用 Puppeteer 拦截真实网络响应 URL，再从 `paps.html?id=...` 中提取。
+7. 使用 Puppeteer 拦截真实网络响应 URL，并统一从资源路径 `paps.html?id=...` 中提取 `id`。
 
 ## 本地运行
 
@@ -22,7 +22,8 @@ docker build -t scheduled-link-collector .
 docker run --rm --env-file .env -p 5000:5000 -v $(pwd)/output:/app/output scheduled-link-collector
 ```
 
-> 该兜底逻辑依赖 Node.js + `puppeteer`（已在 `package.json` 声明；Docker 镜像构建时会自动安装）。
+> 该资源树抓取逻辑依赖 Node.js + `puppeteer`（已在 `package.json` 声明；Docker 镜像构建时会自动安装）。
+> Dockerfile 已包含 Chromium 运行依赖（如 `libglib2.0-0`），用于避免浏览器启动时报 `Code: 127` 共享库缺失。
 
 ## 关键环境变量（均有默认值）
 
@@ -34,6 +35,7 @@ docker run --rm --env-file .env -p 5000:5000 -v $(pwd)/output:/app/output schedu
 - `TZ_NAME`: 时区（默认 `Asia/Shanghai`）
 - `OUTPUT_FILE`: 仅 ID 列表输出文件（默认 `output/tokens.txt`）
 - `IDS_FILE`: ID+比赛信息映射输出文件（默认 `output/ids.json`）
+- `CAPTURE_WAIT_MS`: Puppeteer 导航后额外等待毫秒数（默认 `6000`，用于等异步资源加载）
 - `HOST`: HTTP 服务监听地址（默认 `0.0.0.0`）
 - `PORT`: HTTP 服务端口（默认 `5000`）
 
@@ -43,6 +45,7 @@ docker run --rm --env-file .env -p 5000:5000 -v $(pwd)/output:/app/output schedu
 - `GET /healthz`：健康检查
 - `GET /ids`：JSON 映射（每条包含 `id/league/time/home/away`）
 - `GET /ids.txt`：文本映射（`联赛|时间|主队 vs 客队|id`）
+- `GET /debug`：返回 Node/Puppeteer 可用性、最近错误、资源树抓取样例（支持 `?url=` 指定调试页面）
 - `POST /run-once`：手动触发一次抓取
 
 ## 输出

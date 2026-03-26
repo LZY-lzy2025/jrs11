@@ -9,10 +9,10 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable
-from urllib.parse import parse_qs, urljoin, urlparse
+from urllib.parse import parse_qs, unquote, urljoin, urlparse
 
 import requests
-from flask import Flask, Response, jsonify
+from flask import Flask, Response, jsonify, request
 
 
 @dataclass
@@ -26,6 +26,7 @@ class Config:
     output_file: Path
     ids_file: Path
     timeout_seconds: int
+    capture_wait_ms: int
     host: str
     port: int
 
@@ -41,6 +42,7 @@ def load_config() -> Config:
         output_file=Path(os.getenv("OUTPUT_FILE", "output/tokens.txt")),
         ids_file=Path(os.getenv("IDS_FILE", "output/ids.json")),
         timeout_seconds=int(os.getenv("HTTP_TIMEOUT_SECONDS", "20")),
+        capture_wait_ms=int(os.getenv("CAPTURE_WAIT_MS", "6000")),
         host=os.getenv("HOST", "0.0.0.0"),
         port=int(os.getenv("PORT", "5000")),
     )
@@ -170,41 +172,60 @@ def extract_data_play_urls(page_text: str, cfg: Config) -> list[str]:
     return sorted(set(urls))
 
 
-def extract_tokens(final_page: str) -> list[str]:
-    tokens: list[str] = []
-    tokens.extend(re.findall(r"var\s+encodedStr\s*=\s*'([^']+)'", final_page))
-    return sorted(set(tokens))
-
-
 def extract_paps_ids_from_urls(urls: Iterable[str]) -> list[str]:
     ids: set[str] = set()
-    for value in urls:
+    seen_urls: set[str] = set()
+
+    def walk_url(value: str, depth: int = 0) -> None:
+        if depth > 2:
+            return
+        value = (value or "").strip()
+        if not value or value in seen_urls:
+            return
+        seen_urls.add(value)
+
         try:
             parsed = urlparse(value)
         except Exception:
-            continue
-        if "paps.html" not in parsed.path:
-            continue
-        query = parse_qs(parsed.query)
-        for item in query.get("id", []):
-            token = item.strip()
-            if token:
-                ids.add(token)
+            return
+
+        if "paps.html" in parsed.path:
+            query = parse_qs(parsed.query)
+            for item in query.get("id", []):
+                token = item.strip()
+                if token:
+                    ids.add(token)
+
+        nested_values = []
+        query_map = parse_qs(parsed.query)
+        for vals in query_map.values():
+            nested_values.extend(vals)
+        for frag in nested_values:
+            decoded = unquote(frag).strip()
+            if "http://" in decoded or "https://" in decoded:
+                walk_url(decoded, depth + 1)
+
+    for value in urls:
+        walk_url(value, 0)
     return sorted(ids)
 
 
-async def capture_resource_urls_with_browser(url: str, timeout_seconds: int) -> list[str]:
+async def capture_resource_urls_with_browser(url: str, timeout_seconds: int, capture_wait_ms: int) -> list[str]:
     """
     使用 Puppeteer 网络响应拦截抓取资源 URL，避免依赖正则从 HTML/JS 文本里猜路径。
     """
     script_path = Path(__file__).with_name("capture_paths.js")
     if not script_path.exists():
-        print(f"[warn] puppeteer script missing: {script_path}")
+        msg = f"puppeteer script missing: {script_path}"
+        with STATE.lock:
+            STATE.last_puppeteer_error = msg
+        print(f"[warn] {msg}")
         return []
 
     env = os.environ.copy()
     env["TARGET_URL"] = url
     env["NAV_TIMEOUT_MS"] = str(max(timeout_seconds, 1) * 1000)
+    env["CAPTURE_WAIT_MS"] = str(max(capture_wait_ms, 0))
 
     try:
         proc = await asyncio.to_thread(
@@ -217,31 +238,43 @@ async def capture_resource_urls_with_browser(url: str, timeout_seconds: int) -> 
             check=False,
         )
     except Exception as exc:
-        print(f"[warn] puppeteer runner unavailable: {exc}")
+        msg = f"puppeteer runner unavailable: {exc}"
+        with STATE.lock:
+            STATE.last_puppeteer_error = msg
+        print(f"[warn] {msg}")
         return []
 
     if proc.returncode != 0:
         err = (proc.stderr or proc.stdout).strip()
+        with STATE.lock:
+            STATE.last_puppeteer_error = err
         print(f"[warn] puppeteer capture failed: {err}")
         return []
 
     try:
         data = json.loads(proc.stdout.strip() or "[]")
         if isinstance(data, list):
+            with STATE.lock:
+                STATE.last_puppeteer_error = None
             return sorted({str(x).strip() for x in data if str(x).strip()})
     except Exception as exc:
+        with STATE.lock:
+            STATE.last_puppeteer_error = f"puppeteer output parse failed: {exc}"
         print(f"[warn] puppeteer output parse failed: {exc}")
     return []
 
 
-def extract_tokens_with_resource_tree(base_url: str, page_text: str, cfg: Config) -> list[str]:
+def extract_tokens_with_resource_tree(base_url: str, cfg: Config) -> list[str]:
     """
     通过真实浏览器抓取网络响应 URL，
-    直接从文件路径参数中提取 paps.html?id=... 后面的 id。
+    仅从资源路径参数中提取 paps.html?id=... 后面的 id，
+    不再依赖页面正文正则匹配。
     """
-    tokens: set[str] = set(extract_tokens(page_text))
+    tokens: set[str] = set()
     try:
-        urls = asyncio.run(capture_resource_urls_with_browser(base_url, cfg.timeout_seconds))
+        urls = asyncio.run(
+            capture_resource_urls_with_browser(base_url, cfg.timeout_seconds, cfg.capture_wait_ms)
+        )
         tokens.update(extract_paps_ids_from_urls(urls))
     except Exception as exc:
         print(f"[warn] browser resource capture failed: {base_url} err={exc}")
@@ -283,6 +316,7 @@ class AppState:
         self.last_run_at: str | None = None
         self.last_error: str | None = None
         self.last_count: int = 0
+        self.last_puppeteer_error: str | None = None
 
 
 STATE = AppState()
@@ -337,8 +371,7 @@ def run_once(cfg: Config) -> None:
 
     for dp_url, meta in data_play_tasks:
         try:
-            final_page = fetch_text(dp_url, cfg.timeout_seconds)
-            tokens = extract_tokens_with_resource_tree(dp_url, final_page, cfg)
+            tokens = extract_tokens_with_resource_tree(dp_url, cfg)
 
             for token in tokens:
                 token_only.add(token)
@@ -393,9 +426,10 @@ def create_app(cfg: Config) -> Flask:
                 "last_run_at": STATE.last_run_at,
                 "last_error": STATE.last_error,
                 "mapped_id_count": STATE.last_count,
+                "last_puppeteer_error": STATE.last_puppeteer_error,
                 "ids_file": str(cfg.ids_file),
                 "tokens_file": str(cfg.output_file),
-                "endpoints": ["/", "/healthz", "/ids", "/ids.txt", "/run-once"],
+                "endpoints": ["/", "/healthz", "/ids", "/ids.txt", "/debug", "/run-once"],
             }
         return jsonify(payload)
 
@@ -413,6 +447,56 @@ def create_app(cfg: Config) -> Flask:
         data = read_ids(cfg.ids_file)
         lines = [f'{i["league"]}|{i["time"]}|{i["home"]} vs {i["away"]}|{i["id"]}' for i in data]
         return Response("\n".join(lines) + ("\n" if lines else ""), mimetype="text/plain; charset=utf-8")
+
+    @app.get("/debug")
+    def debug_info() -> Response:
+        target_url = request.args.get("url", "").strip()
+        if not target_url:
+            target_url = cfg.play_host_prefix
+
+        def run_cmd(cmd: list[str], timeout: int = 5) -> dict:
+            try:
+                proc = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout, check=False)
+                return {
+                    "ok": proc.returncode == 0,
+                    "code": proc.returncode,
+                    "stdout": (proc.stdout or "").strip(),
+                    "stderr": (proc.stderr or "").strip(),
+                }
+            except Exception as exc:
+                return {"ok": False, "error": str(exc)}
+
+        node_check = run_cmd(["node", "-v"])
+        npm_check = run_cmd(["npm", "list", "puppeteer", "--depth=0"], timeout=10)
+
+        capture_urls = asyncio.run(
+            capture_resource_urls_with_browser(target_url, min(cfg.timeout_seconds, 15), cfg.capture_wait_ms)
+        )
+        capture_ids = extract_paps_ids_from_urls(capture_urls)
+        sample_size = min(max(int(request.args.get("sample", "10")), 1), 50)
+
+        with STATE.lock:
+            runtime = {
+                "last_run_at": STATE.last_run_at,
+                "last_error": STATE.last_error,
+                "last_puppeteer_error": STATE.last_puppeteer_error,
+                "mapped_id_count": STATE.last_count,
+            }
+
+        payload = {
+            "runtime": runtime,
+            "target_url": target_url,
+            "script_path": str(Path(__file__).with_name("capture_paths.js")),
+            "node_check": node_check,
+            "npm_puppeteer_check": npm_check,
+            "capture": {
+                "resource_url_count": len(capture_urls),
+                "id_count": len(capture_ids),
+                "sample_resource_urls": capture_urls[:sample_size],
+                "sample_ids": capture_ids[:sample_size],
+            },
+        }
+        return jsonify(payload)
 
     @app.post("/run-once")
     def trigger_once() -> Response:
