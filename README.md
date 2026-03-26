@@ -35,6 +35,7 @@ docker run --rm --env-file .env -p 5000:5000 -v $(pwd)/output:/app/output schedu
 - `TZ_NAME`: 时区（默认 `Asia/Shanghai`）
 - `OUTPUT_FILE`: 仅 ID 列表输出文件（默认 `output/tokens.txt`）
 - `IDS_FILE`: ID+比赛信息映射输出文件（默认 `output/ids.json`）
+- `CAPTURE_WAIT_MS`: Puppeteer 导航后额外等待毫秒数（默认 `6000`，用于等异步资源加载）
 - `HOST`: HTTP 服务监听地址（默认 `0.0.0.0`）
 - `PORT`: HTTP 服务端口（默认 `5000`）
 

@@ -9,7 +9,7 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable
-from urllib.parse import parse_qs, urljoin, urlparse
+from urllib.parse import parse_qs, unquote, urljoin, urlparse
 
 import requests
 from flask import Flask, Response, jsonify, request
@@ -26,6 +26,7 @@ class Config:
     output_file: Path
     ids_file: Path
     timeout_seconds: int
+    capture_wait_ms: int
     host: str
     port: int
 
@@ -41,6 +42,7 @@ def load_config() -> Config:
         output_file=Path(os.getenv("OUTPUT_FILE", "output/tokens.txt")),
         ids_file=Path(os.getenv("IDS_FILE", "output/ids.json")),
         timeout_seconds=int(os.getenv("HTTP_TIMEOUT_SECONDS", "20")),
+        capture_wait_ms=int(os.getenv("CAPTURE_WAIT_MS", "6000")),
         host=os.getenv("HOST", "0.0.0.0"),
         port=int(os.getenv("PORT", "5000")),
     )
@@ -172,22 +174,43 @@ def extract_data_play_urls(page_text: str, cfg: Config) -> list[str]:
 
 def extract_paps_ids_from_urls(urls: Iterable[str]) -> list[str]:
     ids: set[str] = set()
-    for value in urls:
+    seen_urls: set[str] = set()
+
+    def walk_url(value: str, depth: int = 0) -> None:
+        if depth > 2:
+            return
+        value = (value or "").strip()
+        if not value or value in seen_urls:
+            return
+        seen_urls.add(value)
+
         try:
             parsed = urlparse(value)
         except Exception:
-            continue
-        if "paps.html" not in parsed.path:
-            continue
-        query = parse_qs(parsed.query)
-        for item in query.get("id", []):
-            token = item.strip()
-            if token:
-                ids.add(token)
+            return
+
+        if "paps.html" in parsed.path:
+            query = parse_qs(parsed.query)
+            for item in query.get("id", []):
+                token = item.strip()
+                if token:
+                    ids.add(token)
+
+        nested_values = []
+        query_map = parse_qs(parsed.query)
+        for vals in query_map.values():
+            nested_values.extend(vals)
+        for frag in nested_values:
+            decoded = unquote(frag).strip()
+            if "http://" in decoded or "https://" in decoded:
+                walk_url(decoded, depth + 1)
+
+    for value in urls:
+        walk_url(value, 0)
     return sorted(ids)
 
 
-async def capture_resource_urls_with_browser(url: str, timeout_seconds: int) -> list[str]:
+async def capture_resource_urls_with_browser(url: str, timeout_seconds: int, capture_wait_ms: int) -> list[str]:
     """
     使用 Puppeteer 网络响应拦截抓取资源 URL，避免依赖正则从 HTML/JS 文本里猜路径。
     """
@@ -202,6 +225,7 @@ async def capture_resource_urls_with_browser(url: str, timeout_seconds: int) -> 
     env = os.environ.copy()
     env["TARGET_URL"] = url
     env["NAV_TIMEOUT_MS"] = str(max(timeout_seconds, 1) * 1000)
+    env["CAPTURE_WAIT_MS"] = str(max(capture_wait_ms, 0))
 
     try:
         proc = await asyncio.to_thread(
@@ -248,7 +272,9 @@ def extract_tokens_with_resource_tree(base_url: str, cfg: Config) -> list[str]:
     """
     tokens: set[str] = set()
     try:
-        urls = asyncio.run(capture_resource_urls_with_browser(base_url, cfg.timeout_seconds))
+        urls = asyncio.run(
+            capture_resource_urls_with_browser(base_url, cfg.timeout_seconds, cfg.capture_wait_ms)
+        )
         tokens.update(extract_paps_ids_from_urls(urls))
     except Exception as exc:
         print(f"[warn] browser resource capture failed: {base_url} err={exc}")
@@ -443,7 +469,9 @@ def create_app(cfg: Config) -> Flask:
         node_check = run_cmd(["node", "-v"])
         npm_check = run_cmd(["npm", "list", "puppeteer", "--depth=0"], timeout=10)
 
-        capture_urls = asyncio.run(capture_resource_urls_with_browser(target_url, min(cfg.timeout_seconds, 15)))
+        capture_urls = asyncio.run(
+            capture_resource_urls_with_browser(target_url, min(cfg.timeout_seconds, 15), cfg.capture_wait_ms)
+        )
         capture_ids = extract_paps_ids_from_urls(capture_urls)
         sample_size = min(max(int(request.args.get("sample", "10")), 1), 50)
 
